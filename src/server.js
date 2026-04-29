@@ -278,6 +278,131 @@ function tryParseTrailingJson(text = "") {
   }
 }
 
+function ensureRadiusOpenClawAdapterContract() {
+  const actions = [];
+
+  if (!fs.existsSync(RADIUS_OPENCLAW_ADAPTER_DIR)) {
+    return {
+      ok: false,
+      adapterDir: RADIUS_OPENCLAW_ADAPTER_DIR,
+      actions,
+      error: "adapter directory missing",
+    };
+  }
+
+  fs.mkdirSync(path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "src"), { recursive: true });
+
+  const legacyManifestPath = fs.existsSync(RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST)
+    ? RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST
+    : null;
+
+  let legacyManifest = null;
+  if (legacyManifestPath) {
+    try {
+      legacyManifest = JSON.parse(fs.readFileSync(legacyManifestPath, "utf8"));
+    } catch {}
+  }
+
+  if (!fs.existsSync(RADIUS_OPENCLAW_PLUGIN_MANIFEST)) {
+    const normalizedName =
+      typeof legacyManifest?.name === "string" && legacyManifest.name.trim()
+        ? legacyManifest.name.trim()
+        : RADIUS_PLUGIN_ID;
+
+    const openclawManifest = {
+      id: RADIUS_PLUGIN_ID,
+      name: normalizedName,
+      description:
+        typeof legacyManifest?.description === "string" && legacyManifest.description.trim()
+          ? legacyManifest.description.trim()
+          : "Radius wallet adapter for OpenClaw",
+      configSchema: {
+        type: "object",
+        additionalProperties: true,
+      },
+      activation: {
+        onStartup: true,
+        onCapabilities: ["tool"],
+      },
+      contracts: {
+        tools: [],
+      },
+    };
+
+    fs.writeFileSync(
+      RADIUS_OPENCLAW_PLUGIN_MANIFEST,
+      `${JSON.stringify(openclawManifest, null, 2)}\n`,
+      "utf8",
+    );
+    actions.push("created openclaw.plugin.json from adapter scaffold");
+  }
+
+  const adapterEntryPath = path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "src", "index.ts");
+  if (!fs.existsSync(adapterEntryPath)) {
+    const entrySource = `import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+
+export default definePluginEntry({
+  id: "${RADIUS_PLUGIN_ID}",
+  name: "Radius Wallet",
+  register(_api) {
+    // Phase 3.2: adapter contract hardening only.
+    // Tool registration lands in Phase 3.4/3.5.
+  },
+});
+`;
+    fs.writeFileSync(adapterEntryPath, entrySource, "utf8");
+    actions.push("created src/index.ts plugin entrypoint scaffold");
+  }
+
+  const adapterPackagePath = path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "package.json");
+  let packageJson = {};
+  if (fs.existsSync(adapterPackagePath)) {
+    try {
+      packageJson = JSON.parse(fs.readFileSync(adapterPackagePath, "utf8"));
+    } catch {
+      packageJson = {};
+    }
+  }
+
+  const previousPackage = JSON.stringify(packageJson);
+  packageJson.name = packageJson.name || `@radiustechsystems/openclaw-${RADIUS_PLUGIN_ID}`;
+  packageJson.version = packageJson.version || "0.0.0";
+  packageJson.type = packageJson.type || "module";
+  packageJson.openclaw = packageJson.openclaw || {};
+
+  const ext = Array.isArray(packageJson.openclaw.extensions)
+    ? packageJson.openclaw.extensions
+    : [];
+  if (!ext.includes("./src/index.ts")) {
+    packageJson.openclaw.extensions = [...new Set([...ext, "./src/index.ts"])
+    ];
+  }
+
+  const runtimeExt = Array.isArray(packageJson.openclaw.runtimeExtensions)
+    ? packageJson.openclaw.runtimeExtensions
+    : [];
+  if (!runtimeExt.includes("./dist/index.js")) {
+    packageJson.openclaw.runtimeExtensions = [
+      ...new Set([...runtimeExt, "./dist/index.js"]),
+    ];
+  }
+
+  if (JSON.stringify(packageJson) !== previousPackage) {
+    fs.writeFileSync(adapterPackagePath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
+    actions.push("updated adapter package.json with openclaw extension metadata");
+  }
+
+  return {
+    ok: true,
+    adapterDir: RADIUS_OPENCLAW_ADAPTER_DIR,
+    actions,
+    legacyManifestPath,
+    openclawManifestPath: RADIUS_OPENCLAW_PLUGIN_MANIFEST,
+    adapterEntryPath,
+    adapterPackagePath,
+  };
+}
+
 async function collectRadiusPluginState(configText = "") {
   const adapterDirExists = fs.existsSync(RADIUS_OPENCLAW_ADAPTER_DIR);
   const manifestPath = pickRadiusPluginManifestPath();
@@ -384,6 +509,8 @@ async function collectRadiusSkillsState() {
 }
 
 async function applyRadiusSkillsConfig() {
+  const adapterHardening = ensureRadiusOpenClawAdapterContract();
+
   const state = await collectRadiusSkillsState();
   const targetExtraDirs = [...new Set([...(state.configuredExtraDirs || []), RADIUS_SKILLS_DIR])];
   const pluginLoadPathsBefore = state.plugin?.configuredPluginLoadPaths || [];
@@ -425,6 +552,7 @@ async function applyRadiusSkillsConfig() {
       configuredPluginLoadPathsAfter: targetPluginLoadPaths,
       adapterPathConfiguredAfter: targetPluginLoadPaths.includes(RADIUS_OPENCLAW_ADAPTER_DIR),
       pluginListAfterConfig: pluginAfter.pluginList,
+      adapterHardening,
     },
     configApplyResults: [
       {
@@ -950,6 +1078,8 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
+    const adapterHardening = ensureRadiusOpenClawAdapterContract();
+
     const payload = req.body || {};
     const validationError = validatePayload(payload);
     if (validationError) {
@@ -961,6 +1091,14 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     let extra = "";
     extra += `\n[setup] Onboarding exit=${onboard.code} configured=${isConfigured()}\n`;
 
+    if (adapterHardening.ok) {
+      for (const action of adapterHardening.actions || []) {
+        extra += `[radius-plugin] ${action}\n`;
+      }
+    } else {
+      extra += `[radius-plugin] adapter hardening skipped: ${adapterHardening.error || "unknown error"}\n`;
+    }
+
     const ok = onboard.code === 0 && isConfigured();
 
     if (ok) {
@@ -971,6 +1109,9 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       extra += `[radius-skills] discovered=${radiusSkills.discoveredSkillCount}\n`;
       if (radiusSkills.missingRequired.length > 0) {
         extra += `[radius-skills] missing required: ${radiusSkills.missingRequired.join(", ")}\n`;
+      }
+      if (radiusSkills?.plugin?.manifestIssues?.length > 0) {
+        extra += `[radius-plugin] manifest issues: ${radiusSkills.plugin.manifestIssues.join("; ")}\n`;
       }
       for (const apply of radiusSkills.configApplyResults) {
         extra += `[radius-skills] config set ${apply.key} exit=${apply.code}\n`;

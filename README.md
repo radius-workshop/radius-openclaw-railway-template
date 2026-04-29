@@ -71,6 +71,14 @@ During setup run, OpenClaw config is updated to include that path under `skills.
 
 For Phase 3.1 runtime contract alignment, setup also ensures `plugins.load.paths` includes `RADIUS_SKILLS_DIR/adapters/openclaw`, so any valid native OpenClaw plugin manifest in the vendored adapter path can be discovered by OpenClaw's plugin loader.
 
+For Phase 3.2 adapter hardening, setup normalizes the vendored Radius OpenClaw adapter into a native plugin contract if it is still scaffold-only:
+
+- creates `adapters/openclaw/openclaw.plugin.json` when missing
+- creates `adapters/openclaw/src/index.ts` plugin entrypoint scaffold when missing
+- ensures adapter `package.json` has `openclaw.extensions` and `openclaw.runtimeExtensions` metadata
+
+This keeps runtime discovery deterministic while we finish tool implementation in Phases 3.4/3.5.
+
 ## Day-1 Setup Checklist
 
 - Confirm `/setup` loads and accepts password
