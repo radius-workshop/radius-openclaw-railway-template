@@ -134,6 +134,7 @@ const RADIUS_SKILLS_DIR =
 const RADIUS_REQUIRED_SKILLS = ["radius-wallet", "a2a-comms", "registering-agent"];
 const RADIUS_SKILL_EXTRA_DIRS_KEY = "skills.load.extraDirs";
 const RADIUS_PLUGIN_LOAD_PATHS_KEY = "plugins.load.paths";
+const RADIUS_PLUGIN_ENABLED_KEY = "plugins.entries.radius-wallet.enabled";
 const RADIUS_PLUGIN_ID = "radius-wallet";
 const RADIUS_OPENCLAW_ADAPTER_DIR = path.join(RADIUS_SKILLS_DIR, "adapters", "openclaw");
 const RADIUS_OPENCLAW_PLUGIN_MANIFEST = path.join(
@@ -450,17 +451,23 @@ async function collectRadiusPluginState(configText = "") {
     commandExitCode: pluginsListResult.code,
     parsedJson: Boolean(pluginsListJson),
     includesRadiusPluginId: false,
+    enabled: false,
   };
 
   if (pluginsListJson) {
-    if (Array.isArray(pluginsListJson)) {
-      pluginListSummary.includesRadiusPluginId = pluginsListJson.some(
-        (p) => p?.id === RADIUS_PLUGIN_ID || p?.name === RADIUS_PLUGIN_ID,
-      );
-    } else if (Array.isArray(pluginsListJson.plugins)) {
-      pluginListSummary.includesRadiusPluginId = pluginsListJson.plugins.some(
-        (p) => p?.id === RADIUS_PLUGIN_ID || p?.name === RADIUS_PLUGIN_ID,
-      );
+    const pluginRows = Array.isArray(pluginsListJson)
+      ? pluginsListJson
+      : Array.isArray(pluginsListJson.plugins)
+        ? pluginsListJson.plugins
+        : [];
+
+    const radiusRow = pluginRows.find(
+      (p) => p?.id === RADIUS_PLUGIN_ID || p?.name === RADIUS_PLUGIN_ID,
+    );
+
+    if (radiusRow) {
+      pluginListSummary.includesRadiusPluginId = true;
+      pluginListSummary.enabled = radiusRow.enabled === true;
     }
   }
 
@@ -538,8 +545,18 @@ async function applyRadiusSkillsConfig() {
     ]),
   );
 
+  const enableRadiusPlugin = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      RADIUS_PLUGIN_ENABLED_KEY,
+      "true",
+    ]),
+  );
+
   const pluginAfter = await collectRadiusPluginState(
-    `${RADIUS_PLUGIN_LOAD_PATHS_KEY}: ${JSON.stringify(targetPluginLoadPaths)}`,
+    `${RADIUS_PLUGIN_LOAD_PATHS_KEY}: ${JSON.stringify(targetPluginLoadPaths)}\n${RADIUS_PLUGIN_ENABLED_KEY}: true`,
   );
 
   return {
@@ -565,6 +582,11 @@ async function applyRadiusSkillsConfig() {
         code: setPluginLoadPaths.code,
         output: setPluginLoadPaths.output || "",
       },
+      {
+        key: RADIUS_PLUGIN_ENABLED_KEY,
+        code: enableRadiusPlugin.code,
+        output: enableRadiusPlugin.output || "",
+      }
     ],
   };
 }
@@ -639,6 +661,12 @@ async function startGateway() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+
+  const radiusBootstrap = await ensureRadiusSkillsConfigured();
+  log.info(
+    "radius-bootstrap",
+    `skills=${radiusBootstrap.discoveredSkillCount} missing=${radiusBootstrap.missingRequired.join(",") || "none"} pluginPathConfigured=${radiusBootstrap.plugin?.adapterPathConfiguredAfter === true} pluginEnabled=${radiusBootstrap.plugin?.pluginListAfterConfig?.enabled === true}`,
+  );
 
   const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
   log.info("gateway", `stop existing gateway exit=${stopResult.code}`);
