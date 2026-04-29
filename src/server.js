@@ -133,6 +133,25 @@ const RADIUS_SKILLS_DIR =
   path.join(STATE_DIR, "external-skills", "radius-skills");
 const RADIUS_REQUIRED_SKILLS = ["radius-wallet", "a2a-comms", "registering-agent"];
 const RADIUS_SKILL_EXTRA_DIRS_KEY = "skills.load.extraDirs";
+const RADIUS_PLUGIN_LOAD_PATHS_KEY = "plugins.load.paths";
+const RADIUS_PLUGIN_ID = "radius-wallet";
+const RADIUS_OPENCLAW_ADAPTER_DIR = path.join(RADIUS_SKILLS_DIR, "adapters", "openclaw");
+const RADIUS_OPENCLAW_PLUGIN_MANIFEST = path.join(
+  RADIUS_OPENCLAW_ADAPTER_DIR,
+  "openclaw.plugin.json",
+);
+const RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST = path.join(
+  RADIUS_OPENCLAW_ADAPTER_DIR,
+  "plugin.json",
+);
+const RADIUS_OPENCLAW_ENTRY_CANDIDATES = [
+  path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "dist", "index.js"),
+  path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "index.js"),
+  path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "src", "index.ts"),
+  path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "src", "radius-wallet.ts"),
+];
+const RADIUS_PLUGIN_DOCS_URL = "https://docs.openclaw.ai/tools/plugin";
+const RADIUS_BUILDING_PLUGIN_DOCS_URL = "https://docs.openclaw.ai/plugins/building-plugins";
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
@@ -194,10 +213,10 @@ function discoverRadiusSkills(rootDir = RADIUS_SKILLS_DIR) {
   return discovered;
 }
 
-function parseConfiguredExtraDirs(configText = "") {
-  if (!configText || typeof configText !== "string") return [];
+function parseConfiguredStringArray(configText = "", key = "") {
+  if (!configText || typeof configText !== "string" || !key) return [];
 
-  const marker = `${RADIUS_SKILL_EXTRA_DIRS_KEY}:`;
+  const marker = `${key}:`;
   const idx = configText.indexOf(marker);
   if (idx === -1) return [];
 
@@ -210,15 +229,133 @@ function parseConfiguredExtraDirs(configText = "") {
       1,
       firstLine.lastIndexOf("]") >= 0 ? firstLine.lastIndexOf("]") : undefined,
     );
-    return [...new Set(
-      inside
-        .split(",")
-        .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
-        .filter(Boolean),
-    )];
+    return [
+      ...new Set(
+        inside
+          .split(",")
+          .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
+          .filter(Boolean),
+      ),
+    ];
   }
 
   return [firstLine.replace(/^['"]|['"]$/g, "")].filter(Boolean);
+}
+
+function parseConfiguredExtraDirs(configText = "") {
+  return parseConfiguredStringArray(configText, RADIUS_SKILL_EXTRA_DIRS_KEY);
+}
+
+function parseConfiguredPluginLoadPaths(configText = "") {
+  return parseConfiguredStringArray(configText, RADIUS_PLUGIN_LOAD_PATHS_KEY);
+}
+
+function pickRadiusPluginManifestPath() {
+  if (fs.existsSync(RADIUS_OPENCLAW_PLUGIN_MANIFEST)) {
+    return RADIUS_OPENCLAW_PLUGIN_MANIFEST;
+  }
+  if (fs.existsSync(RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST)) {
+    return RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST;
+  }
+  return null;
+}
+
+function pickRadiusPluginEntryCandidate() {
+  for (const candidate of RADIUS_OPENCLAW_ENTRY_CANDIDATES) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function tryParseTrailingJson(text = "") {
+  if (!text || typeof text !== "string") return null;
+  const match = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])\s*$/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+async function collectRadiusPluginState(configText = "") {
+  const adapterDirExists = fs.existsSync(RADIUS_OPENCLAW_ADAPTER_DIR);
+  const manifestPath = pickRadiusPluginManifestPath();
+  const manifestFormat = manifestPath?.endsWith("openclaw.plugin.json")
+    ? "openclaw.plugin.json"
+    : manifestPath?.endsWith("plugin.json")
+      ? "plugin.json"
+      : null;
+
+  let manifest = null;
+  const manifestIssues = [];
+
+  if (!adapterDirExists) {
+    manifestIssues.push("adapter directory missing");
+  }
+
+  if (!manifestPath) {
+    manifestIssues.push("missing plugin manifest (expected openclaw.plugin.json)");
+  } else {
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      if (!manifest?.name) {
+        manifestIssues.push("manifest missing name");
+      }
+      if (manifestFormat === "plugin.json") {
+        manifestIssues.push("legacy plugin.json present; docs indicate openclaw.plugin.json for native plugins");
+      }
+    } catch {
+      manifestIssues.push("manifest is not valid JSON");
+    }
+  }
+
+  const entryCandidate = pickRadiusPluginEntryCandidate();
+  if (!entryCandidate) {
+    manifestIssues.push("no runtime entry candidate found (dist/index.js, index.js, src/index.ts, src/radius-wallet.ts)");
+  }
+
+  const configuredPluginLoadPaths = parseConfiguredPluginLoadPaths(configText);
+  const adapterPathConfigured = configuredPluginLoadPaths.includes(RADIUS_OPENCLAW_ADAPTER_DIR);
+
+  const pluginsListResult = await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "list", "--json"]));
+  const pluginsListJson = tryParseTrailingJson(pluginsListResult.output || "");
+
+  const pluginListSummary = {
+    commandExitCode: pluginsListResult.code,
+    parsedJson: Boolean(pluginsListJson),
+    includesRadiusPluginId: false,
+  };
+
+  if (pluginsListJson) {
+    if (Array.isArray(pluginsListJson)) {
+      pluginListSummary.includesRadiusPluginId = pluginsListJson.some(
+        (p) => p?.id === RADIUS_PLUGIN_ID || p?.name === RADIUS_PLUGIN_ID,
+      );
+    } else if (Array.isArray(pluginsListJson.plugins)) {
+      pluginListSummary.includesRadiusPluginId = pluginsListJson.plugins.some(
+        (p) => p?.id === RADIUS_PLUGIN_ID || p?.name === RADIUS_PLUGIN_ID,
+      );
+    }
+  }
+
+  return {
+    docsReference: {
+      pluginInstall: RADIUS_PLUGIN_DOCS_URL,
+      pluginAuthoring: RADIUS_BUILDING_PLUGIN_DOCS_URL,
+    },
+    expectedPluginId: RADIUS_PLUGIN_ID,
+    adapterDir: RADIUS_OPENCLAW_ADAPTER_DIR,
+    adapterDirExists,
+    manifestPath,
+    manifestFormat,
+    manifest,
+    manifestIssues,
+    entryCandidate,
+    configuredPluginLoadPaths,
+    adapterPathConfigured,
+    pluginList: pluginListSummary,
+  };
 }
 
 async function collectRadiusSkillsState() {
@@ -233,6 +370,8 @@ async function collectRadiusSkillsState() {
     (name) => !discoveredNames.includes(name),
   );
 
+  const pluginProbe = await collectRadiusPluginState(configText);
+
   return {
     radiusSkillsDir: RADIUS_SKILLS_DIR,
     discoveredSkills: discovered,
@@ -240,14 +379,17 @@ async function collectRadiusSkillsState() {
     discoveredSkillCount: discovered.length,
     configuredExtraDirs,
     missingRequired,
+    plugin: pluginProbe,
   };
 }
 
 async function applyRadiusSkillsConfig() {
   const state = await collectRadiusSkillsState();
   const targetExtraDirs = [...new Set([...(state.configuredExtraDirs || []), RADIUS_SKILLS_DIR])];
+  const pluginLoadPathsBefore = state.plugin?.configuredPluginLoadPaths || [];
+  const targetPluginLoadPaths = [...new Set([...pluginLoadPathsBefore, RADIUS_OPENCLAW_ADAPTER_DIR])];
 
-  const setResult = await runCmd(
+  const setSkillsDirs = await runCmd(
     OPENCLAW_NODE,
     clawArgs([
       "config",
@@ -258,15 +400,42 @@ async function applyRadiusSkillsConfig() {
     ]),
   );
 
+  const setPluginLoadPaths = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      RADIUS_PLUGIN_LOAD_PATHS_KEY,
+      JSON.stringify(targetPluginLoadPaths),
+    ]),
+  );
+
+  const pluginAfter = await collectRadiusPluginState(
+    `${RADIUS_PLUGIN_LOAD_PATHS_KEY}: ${JSON.stringify(targetPluginLoadPaths)}`,
+  );
+
   return {
     ...state,
     configuredExtraDirsBefore: state.configuredExtraDirs,
     configuredExtraDirsAfter: targetExtraDirs,
+    plugin: {
+      ...state.plugin,
+      configuredPluginLoadPathsBefore: pluginLoadPathsBefore,
+      configuredPluginLoadPathsAfter: targetPluginLoadPaths,
+      adapterPathConfiguredAfter: targetPluginLoadPaths.includes(RADIUS_OPENCLAW_ADAPTER_DIR),
+      pluginListAfterConfig: pluginAfter.pluginList,
+    },
     configApplyResults: [
       {
         key: RADIUS_SKILL_EXTRA_DIRS_KEY,
-        code: setResult.code,
-        output: setResult.output || "",
+        code: setSkillsDirs.code,
+        output: setSkillsDirs.output || "",
+      },
+      {
+        key: RADIUS_PLUGIN_LOAD_PATHS_KEY,
+        code: setPluginLoadPaths.code,
+        output: setPluginLoadPaths.output || "",
       },
     ],
   };

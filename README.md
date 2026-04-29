@@ -69,6 +69,8 @@ At container start, vendored skills are copied into persistent storage (`RADIUS_
 
 During setup run, OpenClaw config is updated to include that path under `skills.load.extraDirs` (the documented OpenClaw key for extra shared skill folders).
 
+For Phase 3.1 runtime contract alignment, setup also ensures `plugins.load.paths` includes `RADIUS_SKILLS_DIR/adapters/openclaw`, so any valid native OpenClaw plugin manifest in the vendored adapter path can be discovered by OpenClaw's plugin loader.
+
 ## Day-1 Setup Checklist
 
 - Confirm `/setup` loads and accepts password
