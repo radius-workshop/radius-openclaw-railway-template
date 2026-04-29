@@ -141,6 +141,13 @@ const RADIUS_READ_TOOL_NAMES = [
   "radius_balance",
   "radius_tx_status",
 ];
+const RADIUS_WRITE_TOOL_NAMES = [
+  "radius_send_sbc",
+];
+const RADIUS_TOOL_NAMES = [
+  ...RADIUS_READ_TOOL_NAMES,
+  ...RADIUS_WRITE_TOOL_NAMES,
+];
 const RADIUS_OPENCLAW_ADAPTER_DIR = path.join(RADIUS_SKILLS_DIR, "adapters", "openclaw");
 const RADIUS_OPENCLAW_PLUGIN_MANIFEST = path.join(
   RADIUS_OPENCLAW_ADAPTER_DIR,
@@ -311,18 +318,19 @@ function collectRadiusRuntimeReadiness() {
     runtimeCliExists: fs.existsSync(RADIUS_OPENCLAW_RUNTIME_CLI),
     pythonPath: null,
     pythonAvailable: false,
-    cliReadOpsProbe: {
+    cliProbe: {
       ok: false,
       code: null,
       tools: [],
-      missing: [],
+      missingReadOps: [],
+      missingWriteOps: [],
       output: "",
       error: null,
     },
   };
 
   if (!runtime.runtimeModuleExists || !runtime.runtimeCliExists) {
-    runtime.cliReadOpsProbe.error =
+    runtime.cliProbe.error =
       "runtime python module or CLI missing under adapters/openclaw/runtime/python";
     return runtime;
   }
@@ -352,7 +360,7 @@ function collectRadiusRuntimeReadiness() {
   }
 
   if (!runtime.pythonAvailable || !runtime.pythonPath) {
-    runtime.cliReadOpsProbe.error =
+    runtime.cliProbe.error =
       "python runtime unavailable (set RADIUS_PYTHON_BIN or install python3)";
     return runtime;
   }
@@ -377,22 +385,25 @@ function collectRadiusRuntimeReadiness() {
   });
 
   const rawOutput = `${probe.stdout || ""}${probe.stderr || ""}`.trim();
-  runtime.cliReadOpsProbe.code = typeof probe.status === "number" ? probe.status : 1;
-  runtime.cliReadOpsProbe.output = rawOutput;
+  runtime.cliProbe.code = typeof probe.status === "number" ? probe.status : 1;
+  runtime.cliProbe.output = rawOutput;
 
   if (probe.status !== 0) {
-    runtime.cliReadOpsProbe.error = rawOutput || "read-op probe failed";
+    runtime.cliProbe.error = rawOutput || "runtime CLI probe failed";
     return runtime;
   }
 
   const parsed = tryParseTrailingJson(rawOutput);
   const tools = Array.isArray(parsed?.commands) ? parsed.commands : [];
-  const readOnlyOps = ["wallet-address", "balance", "tx-status"];
-  const missing = readOnlyOps.filter((name) => !tools.includes(name));
+  const readOps = ["wallet-address", "balance", "tx-status"];
+  const writeOps = ["send-sbc"];
+  const missingReadOps = readOps.filter((name) => !tools.includes(name));
+  const missingWriteOps = writeOps.filter((name) => !tools.includes(name));
 
-  runtime.cliReadOpsProbe.tools = tools;
-  runtime.cliReadOpsProbe.missing = missing;
-  runtime.cliReadOpsProbe.ok = missing.length === 0;
+  runtime.cliProbe.tools = tools;
+  runtime.cliProbe.missingReadOps = missingReadOps;
+  runtime.cliProbe.missingWriteOps = missingWriteOps;
+  runtime.cliProbe.ok = missingReadOps.length === 0 && missingWriteOps.length === 0;
   return runtime;
 }
 
@@ -461,7 +472,7 @@ function ensureRadiusOpenClawAdapterContract() {
       onCapabilities: ["tool"],
     },
     contracts: {
-      tools: RADIUS_READ_TOOL_NAMES,
+      tools: RADIUS_TOOL_NAMES,
     },
   };
 
@@ -567,6 +578,39 @@ export default definePluginEntry({
       async execute(_id, params) {
         try {
           const result = runtime.tx_status(params.tx_hash);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        } catch (err) {
+          return mapError(err);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "radius_send_sbc",
+      description: "Send SBC on Radius Testnet to a recipient address.",
+      parameters: Type.Object({
+        to: Type.String(),
+        amount_sbc: Type.String(),
+        provider: Type.Optional(Type.Union([Type.Literal("local"), Type.Literal("para")])),
+        network: Type.Optional(Type.Union([Type.Literal("testnet"), Type.Literal("mainnet")])),
+      }),
+      async execute(_id, params) {
+        try {
+          const normalized = {
+            to: params?.to,
+            amount_sbc: params?.amount_sbc,
+            provider: params?.provider,
+            network: params?.network,
+          };
+          const result = runtime.send_sbc(
+            normalized.to,
+            normalized.amount_sbc,
+            normalized.provider ?? "local",
+            normalized.network,
+          );
           return {
             content: [{ type: "text", text: JSON.stringify(result) }],
             structuredContent: result,
@@ -724,6 +768,8 @@ async function collectRadiusPluginState(configText = "") {
     },
     expectedPluginId: RADIUS_PLUGIN_ID,
     expectedReadTools: RADIUS_READ_TOOL_NAMES,
+    expectedWriteTools: RADIUS_WRITE_TOOL_NAMES,
+    expectedTools: RADIUS_TOOL_NAMES,
     adapterDir: RADIUS_OPENCLAW_ADAPTER_DIR,
     adapterDirExists,
     manifestPath,
@@ -807,8 +853,15 @@ async function applyRadiusSkillsConfig() {
     `${RADIUS_PLUGIN_LOAD_PATHS_KEY}: ${JSON.stringify(targetPluginLoadPaths)}\n${RADIUS_PLUGIN_ENABLED_KEY}: true`,
   );
 
+  const readProbe = pluginAfter?.runtime?.cliProbe;
   const pluginReadOpsReady =
-    pluginAfter?.runtime?.cliReadOpsProbe?.ok === true &&
+    Boolean(readProbe) &&
+    readProbe.missingReadOps?.length === 0 &&
+    pluginAfter?.pluginList?.enabled === true &&
+    pluginAfter?.adapterPathConfigured === true;
+  const pluginWriteOpsReady =
+    Boolean(readProbe) &&
+    readProbe.missingWriteOps?.length === 0 &&
     pluginAfter?.pluginList?.enabled === true &&
     pluginAfter?.adapterPathConfigured === true;
 
@@ -824,6 +877,7 @@ async function applyRadiusSkillsConfig() {
       pluginListAfterConfig: pluginAfter.pluginList,
       runtimeAfterConfig: pluginAfter.runtime,
       readOpsReadyAfterConfig: pluginReadOpsReady,
+      writeOpsReadyAfterConfig: pluginWriteOpsReady,
       adapterHardening,
     },
     configApplyResults: [
@@ -920,7 +974,7 @@ async function startGateway() {
   const radiusBootstrap = await ensureRadiusSkillsConfigured();
   log.info(
     "radius-bootstrap",
-    `skills=${radiusBootstrap.discoveredSkillCount} missing=${radiusBootstrap.missingRequired.join(",") || "none"} pluginPathConfigured=${radiusBootstrap.plugin?.adapterPathConfiguredAfter === true} pluginEnabled=${radiusBootstrap.plugin?.pluginListAfterConfig?.enabled === true} readOpsReady=${radiusBootstrap.plugin?.readOpsReadyAfterConfig === true} readOpsMissing=${(radiusBootstrap.plugin?.runtimeAfterConfig?.cliReadOpsProbe?.missing || []).join(",") || "none"}`,
+    `skills=${radiusBootstrap.discoveredSkillCount} missing=${radiusBootstrap.missingRequired.join(",") || "none"} pluginPathConfigured=${radiusBootstrap.plugin?.adapterPathConfiguredAfter === true} pluginEnabled=${radiusBootstrap.plugin?.pluginListAfterConfig?.enabled === true} readOpsReady=${radiusBootstrap.plugin?.readOpsReadyAfterConfig === true} readOpsMissing=${(radiusBootstrap.plugin?.runtimeAfterConfig?.cliProbe?.missingReadOps || []).join(",") || "none"} writeOpsReady=${radiusBootstrap.plugin?.writeOpsReadyAfterConfig === true} writeOpsMissing=${(radiusBootstrap.plugin?.runtimeAfterConfig?.cliProbe?.missingWriteOps || []).join(",") || "none"}`,
   );
 
   const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
@@ -1396,14 +1450,17 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       if (radiusSkills?.plugin?.manifestIssues?.length > 0) {
         extra += `[radius-plugin] manifest issues: ${radiusSkills.plugin.manifestIssues.join("; ")}\n`;
       }
-      const runtimeProbe = radiusSkills?.plugin?.runtimeAfterConfig?.cliReadOpsProbe;
+      const runtimeProbe = radiusSkills?.plugin?.runtimeAfterConfig?.cliProbe;
       if (runtimeProbe) {
-        extra += `[radius-plugin] read-op probe ok=${runtimeProbe.ok === true} exit=${runtimeProbe.code}\n`;
-        if (runtimeProbe.missing?.length > 0) {
-          extra += `[radius-plugin] read-op probe missing: ${runtimeProbe.missing.join(", ")}\n`;
+        extra += `[radius-plugin] runtime probe ok=${runtimeProbe.ok === true} exit=${runtimeProbe.code}\n`;
+        if (runtimeProbe.missingReadOps?.length > 0) {
+          extra += `[radius-plugin] runtime probe missing read ops: ${runtimeProbe.missingReadOps.join(", ")}\n`;
+        }
+        if (runtimeProbe.missingWriteOps?.length > 0) {
+          extra += `[radius-plugin] runtime probe missing write ops: ${runtimeProbe.missingWriteOps.join(", ")}\n`;
         }
         if (runtimeProbe.error) {
-          extra += `[radius-plugin] read-op probe error: ${runtimeProbe.error}\n`;
+          extra += `[radius-plugin] runtime probe error: ${runtimeProbe.error}\n`;
         }
       }
       for (const apply of radiusSkills.configApplyResults) {
