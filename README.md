@@ -53,12 +53,56 @@ This template exposes your OpenClaw gateway to the public internet.
 - `ENABLE_WEB_TUI=false`
 - `TUI_IDLE_TIMEOUT_MS=300000`
 - `TUI_MAX_SESSION_MS=1800000`
+- `RADIUS_SKILLS_DIR=/data/.openclaw/external-skills/radius-skills`
+- `RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE=true`
+
+### Build-time skills source pinning
+
+This template vendors the Radius skills repo into the image at `/app/vendor/radius-skills`.
+
+By default it tracks `main`, but you can pin a PR commit SHA for same-day testing:
+
+- `RADIUS_SKILLS_REPO` (default: `https://github.com/radiustechsystems/skills.git`)
+- `RADIUS_SKILLS_REF` (default: `main`; set to branch or commit SHA)
+
+At container start, vendored skills are copied into persistent storage (`RADIUS_SKILLS_DIR`) when no git checkout exists there yet.
+
+During setup run, OpenClaw config is updated to include that path under `skills.load.extraDirs` (the documented OpenClaw key for extra shared skill folders).
+
+For Phase 3.1 runtime contract alignment, setup also ensures:
+
+- `plugins.load.paths` includes `RADIUS_SKILLS_DIR/adapters/openclaw`
+- `plugins.entries.radius-wallet.enabled=true`
+
+so the vendored adapter path is discoverable and the Radius plugin is explicitly enabled in config.
+
+For Phase 3.2 adapter hardening, setup normalizes the vendored Radius OpenClaw adapter into a native plugin contract if it is still scaffold-only:
+
+- creates `adapters/openclaw/openclaw.plugin.json` when missing
+- creates `adapters/openclaw/src/index.ts` plugin entrypoint scaffold when missing
+- ensures adapter `package.json` has `openclaw.extensions` and `openclaw.runtimeExtensions` metadata
+
+For Phase 3.4/3.5 deterministic runtime wiring, setup also ensures:
+
+- `adapters/openclaw/src/index.ts` registers deterministic Radius wallet tools:
+  - read ops: `radius_wallet_address`, `radius_balance`, `radius_tx_status`
+  - write ops: `radius_send_sbc`
+- shared Python runtime files are present at `adapters/openclaw/runtime/python/`:
+  - `radius_wallet_runtime.py`
+  - `radius_wallet_cli.py`
+- plugin contract advertises read + write tools in `openclaw.plugin.json` contracts
+- setup/debug surfaces include runtime readiness probe output:
+  - missing read commands (`wallet-address`, `balance`, `tx-status`)
+  - missing write commands (`send-sbc`)
+
+This keeps runtime discovery and wallet tool behavior deterministic for both read and send paths.
 
 ## Day-1 Setup Checklist
 
 - Confirm `/setup` loads and accepts password
 - Run onboarding once
 - Verify `/healthz` returns `{ "ok": true, ... }`
+- In setup status card, confirm Radius skills source and discovered count are shown
 - Open `/openclaw` via setup link
 - If using Telegram/Discord, approve pending devices from setup tools
 

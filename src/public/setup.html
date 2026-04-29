@@ -34,6 +34,7 @@
       isReady: false,
       tuiEnabled: false,
       exporting: false,
+      radiusSkills: null,
       showExportInfo: false,
       showDevicesModal: false,
       devicesLoading: false,
@@ -66,6 +67,7 @@
           this.configured = j.configured;
           this.openclawVersion = j.openclawVersion || '';
           this.tuiEnabled = j.tuiEnabled || false;
+          this.radiusSkills = j.radiusSkills || null;
           this.status = j.configured ? 'Configured - open /openclaw' : 'Not configured - run setup below';
           this.authGroups = j.authGroups || [];
           if (this.authGroups.length > 0) {
@@ -367,6 +369,23 @@
           Open Terminal
           <svg class="icon-link" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
         </a>
+      </div>
+
+      <div x-show="radiusSkills" class="card-links" style="margin-top:0.75rem; display:block; font-size:0.8rem; color:var(--text-mid)">
+        <div><strong>Radius skills source:</strong> <span x-text="radiusSkills.radiusSkillsDir"></span></div>
+        <div><strong>Discovered skills:</strong> <span x-text="radiusSkills.discoveredSkillCount"></span></div>
+        <div><strong>Configured extraDirs:</strong> <span x-text="(radiusSkills.configuredExtraDirs && radiusSkills.configuredExtraDirs.length) ? radiusSkills.configuredExtraDirs.join(', ') : 'none'"></span></div>
+        <div>
+          <strong>Missing required:</strong>
+          <span x-text="(radiusSkills.missingRequired && radiusSkills.missingRequired.length) ? radiusSkills.missingRequired.join(', ') : 'none'"></span>
+        </div>
+        <div><strong>Plugin load paths:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.configuredPluginLoadPaths && radiusSkills.plugin.configuredPluginLoadPaths.length) ? radiusSkills.plugin.configuredPluginLoadPaths.join(', ') : 'none'"></span></div>
+        <div><strong>Plugin enabled (list):</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.pluginList && radiusSkills.plugin.pluginList.includesRadiusPluginId) ? (radiusSkills.plugin.pluginList.enabled ? 'yes' : 'no') : 'not listed'"></span></div>
+        <div><strong>Read ops expected:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.expectedReadTools && radiusSkills.plugin.expectedReadTools.length) ? radiusSkills.plugin.expectedReadTools.join(', ') : 'none'"></span></div>
+        <div><strong>Write ops expected:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.expectedWriteTools && radiusSkills.plugin.expectedWriteTools.length) ? radiusSkills.plugin.expectedWriteTools.join(', ') : 'none'"></span></div>
+        <div><strong>Runtime probe ready:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.runtime && radiusSkills.plugin.runtime.cliProbe) ? (radiusSkills.plugin.runtime.cliProbe.ok ? 'yes' : 'no') : 'no-probe'"></span></div>
+        <div><strong>Runtime probe missing read ops:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.runtime && radiusSkills.plugin.runtime.cliProbe && radiusSkills.plugin.runtime.cliProbe.missingReadOps && radiusSkills.plugin.runtime.cliProbe.missingReadOps.length) ? radiusSkills.plugin.runtime.cliProbe.missingReadOps.join(', ') : 'none'"></span></div>
+        <div><strong>Runtime probe missing write ops:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.runtime && radiusSkills.plugin.runtime.cliProbe && radiusSkills.plugin.runtime.cliProbe.missingWriteOps && radiusSkills.plugin.runtime.cliProbe.missingWriteOps.length) ? radiusSkills.plugin.runtime.cliProbe.missingWriteOps.join(', ') : 'none'"></span></div>
       </div>
     </div>
 
