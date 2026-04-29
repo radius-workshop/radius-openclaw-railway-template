@@ -374,6 +374,7 @@
       <div x-show="radiusSkills" class="card-links" style="margin-top:0.75rem; display:block; font-size:0.8rem; color:var(--text-mid)">
         <div><strong>Radius skills source:</strong> <span x-text="radiusSkills.radiusSkillsDir"></span></div>
         <div><strong>Discovered skills:</strong> <span x-text="radiusSkills.discoveredSkillCount"></span></div>
+        <div><strong>Configured extraDirs:</strong> <span x-text="(radiusSkills.configuredExtraDirs && radiusSkills.configuredExtraDirs.length) ? radiusSkills.configuredExtraDirs.join(', ') : 'none'"></span></div>
         <div>
           <strong>Missing required:</strong>
           <span x-text="(radiusSkills.missingRequired && radiusSkills.missingRequired.length) ? radiusSkills.missingRequired.join(', ') : 'none'"></span>

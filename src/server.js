@@ -132,11 +132,7 @@ const RADIUS_SKILLS_DIR =
   process.env.RADIUS_SKILLS_DIR?.trim() ||
   path.join(STATE_DIR, "external-skills", "radius-skills");
 const RADIUS_REQUIRED_SKILLS = ["radius-wallet", "a2a-comms", "registering-agent"];
-const RADIUS_SKILL_CONFIG_KEYS = [
-  "skills.externalDirs",
-  "skills.external_dirs",
-  "agent.skills.externalDirs",
-];
+const RADIUS_SKILL_EXTRA_DIRS_KEY = "skills.load.extraDirs";
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
@@ -198,59 +194,86 @@ function discoverRadiusSkills(rootDir = RADIUS_SKILLS_DIR) {
   return discovered;
 }
 
-function parseConfiguredSkillRoots(configText = "") {
+function parseConfiguredExtraDirs(configText = "") {
   if (!configText || typeof configText !== "string") return [];
-  const roots = [];
-  for (const key of RADIUS_SKILL_CONFIG_KEYS) {
-    const marker = `${key}:`;
-    const idx = configText.indexOf(marker);
-    if (idx === -1) continue;
-    const after = configText.slice(idx + marker.length);
-    const firstLine = (after.split("\n")[0] || "").trim();
-    if (!firstLine) continue;
 
-    if (firstLine.startsWith("[")) {
-      const inside = firstLine.slice(1, firstLine.lastIndexOf("]") >= 0 ? firstLine.lastIndexOf("]") : undefined);
-      const parts = inside.split(",").map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
-      roots.push(...parts);
-    } else {
-      roots.push(firstLine.replace(/^['"]|['"]$/g, ""));
-    }
+  const marker = `${RADIUS_SKILL_EXTRA_DIRS_KEY}:`;
+  const idx = configText.indexOf(marker);
+  if (idx === -1) return [];
+
+  const after = configText.slice(idx + marker.length);
+  const firstLine = (after.split("\n")[0] || "").trim();
+  if (!firstLine) return [];
+
+  if (firstLine.startsWith("[")) {
+    const inside = firstLine.slice(
+      1,
+      firstLine.lastIndexOf("]") >= 0 ? firstLine.lastIndexOf("]") : undefined,
+    );
+    return [...new Set(
+      inside
+        .split(",")
+        .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
+        .filter(Boolean),
+    )];
   }
-  return [...new Set(roots)];
+
+  return [firstLine.replace(/^['"]|['"]$/g, "")].filter(Boolean);
 }
 
-async function ensureRadiusSkillsConfigured() {
+async function collectRadiusSkillsState() {
   const discovered = discoverRadiusSkills(RADIUS_SKILLS_DIR);
   const discoveredNames = [...new Set(discovered.map((x) => x.name))];
 
   const getConfig = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get"]));
   const configText = getConfig.output || "";
-  const configuredRoots = parseConfiguredSkillRoots(configText);
+  const configuredExtraDirs = parseConfiguredExtraDirs(configText);
 
-  const targetRoots = [...new Set([...(configuredRoots || []), RADIUS_SKILLS_DIR])];
-  const applyResults = [];
-
-  for (const key of RADIUS_SKILL_CONFIG_KEYS) {
-    const setResult = await runCmd(
-      OPENCLAW_NODE,
-      clawArgs(["config", "set", "--json", key, JSON.stringify(targetRoots)]),
-    );
-    applyResults.push({ key, code: setResult.code, output: setResult.output || "" });
-  }
-
-  const missingRequired = RADIUS_REQUIRED_SKILLS.filter((name) => !discoveredNames.includes(name));
+  const missingRequired = RADIUS_REQUIRED_SKILLS.filter(
+    (name) => !discoveredNames.includes(name),
+  );
 
   return {
     radiusSkillsDir: RADIUS_SKILLS_DIR,
     discoveredSkills: discovered,
     discoveredSkillNames: discoveredNames,
     discoveredSkillCount: discovered.length,
-    configuredRootsBefore: configuredRoots,
-    configuredRootsAfter: targetRoots,
-    configApplyResults: applyResults,
+    configuredExtraDirs,
     missingRequired,
   };
+}
+
+async function applyRadiusSkillsConfig() {
+  const state = await collectRadiusSkillsState();
+  const targetExtraDirs = [...new Set([...(state.configuredExtraDirs || []), RADIUS_SKILLS_DIR])];
+
+  const setResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      RADIUS_SKILL_EXTRA_DIRS_KEY,
+      JSON.stringify(targetExtraDirs),
+    ]),
+  );
+
+  return {
+    ...state,
+    configuredExtraDirsBefore: state.configuredExtraDirs,
+    configuredExtraDirsAfter: targetExtraDirs,
+    configApplyResults: [
+      {
+        key: RADIUS_SKILL_EXTRA_DIRS_KEY,
+        code: setResult.code,
+        output: setResult.output || "",
+      },
+    ],
+  };
+}
+
+async function ensureRadiusSkillsConfigured() {
+  return applyRadiusSkillsConfig();
 }
 
 async function syncAllowedOrigins() {
@@ -522,7 +545,7 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   const { version, channelsHelp } = await getOpenclawInfo();
-  const radiusSkills = await ensureRadiusSkillsConfigured();
+  const radiusSkills = await collectRadiusSkillsState();
 
   const authGroups = [
     {
@@ -898,7 +921,7 @@ app.get("/setup/api/debug", requireSetupAuth, async (_req, res) => {
     OPENCLAW_NODE,
     clawArgs(["channels", "add", "--help"]),
   );
-  const radiusSkills = await ensureRadiusSkillsConfigured();
+  const radiusSkills = await collectRadiusSkillsState();
   res.json({
     wrapper: {
       node: process.version,

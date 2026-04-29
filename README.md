@@ -67,6 +67,8 @@ By default it tracks `main`, but you can pin a PR commit SHA for same-day testin
 
 At container start, vendored skills are copied into persistent storage (`RADIUS_SKILLS_DIR`) when no git checkout exists there yet.
 
+During setup run, OpenClaw config is updated to include that path under `skills.load.extraDirs` (the documented OpenClaw key for extra shared skill folders).
+
 ## Day-1 Setup Checklist
 
 - Confirm `/setup` loads and accepts password
