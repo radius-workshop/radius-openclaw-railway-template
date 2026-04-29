@@ -379,6 +379,11 @@
           <strong>Missing required:</strong>
           <span x-text="(radiusSkills.missingRequired && radiusSkills.missingRequired.length) ? radiusSkills.missingRequired.join(', ') : 'none'"></span>
         </div>
+        <div><strong>Plugin load paths:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.configuredPluginLoadPaths && radiusSkills.plugin.configuredPluginLoadPaths.length) ? radiusSkills.plugin.configuredPluginLoadPaths.join(', ') : 'none'"></span></div>
+        <div><strong>Plugin enabled (list):</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.pluginList && radiusSkills.plugin.pluginList.includesRadiusPluginId) ? (radiusSkills.plugin.pluginList.enabled ? 'yes' : 'no') : 'not listed'"></span></div>
+        <div><strong>Read ops expected:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.expectedReadTools && radiusSkills.plugin.expectedReadTools.length) ? radiusSkills.plugin.expectedReadTools.join(', ') : 'none'"></span></div>
+        <div><strong>Read-op probe ready:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.runtime && radiusSkills.plugin.runtime.cliReadOpsProbe) ? (radiusSkills.plugin.runtime.cliReadOpsProbe.ok ? 'yes' : 'no') : 'no-probe'"></span></div>
+        <div><strong>Read-op probe missing:</strong> <span x-text="(radiusSkills.plugin && radiusSkills.plugin.runtime && radiusSkills.plugin.runtime.cliReadOpsProbe && radiusSkills.plugin.runtime.cliReadOpsProbe.missing && radiusSkills.plugin.runtime.cliReadOpsProbe.missing.length) ? radiusSkills.plugin.runtime.cliReadOpsProbe.missing.join(', ') : 'none'"></span></div>
       </div>
     </div>
 

@@ -136,6 +136,11 @@ const RADIUS_SKILL_EXTRA_DIRS_KEY = "skills.load.extraDirs";
 const RADIUS_PLUGIN_LOAD_PATHS_KEY = "plugins.load.paths";
 const RADIUS_PLUGIN_ENABLED_KEY = "plugins.entries.radius-wallet.enabled";
 const RADIUS_PLUGIN_ID = "radius-wallet";
+const RADIUS_READ_TOOL_NAMES = [
+  "radius_wallet_address",
+  "radius_balance",
+  "radius_tx_status",
+];
 const RADIUS_OPENCLAW_ADAPTER_DIR = path.join(RADIUS_SKILLS_DIR, "adapters", "openclaw");
 const RADIUS_OPENCLAW_PLUGIN_MANIFEST = path.join(
   RADIUS_OPENCLAW_ADAPTER_DIR,
@@ -144,6 +149,18 @@ const RADIUS_OPENCLAW_PLUGIN_MANIFEST = path.join(
 const RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST = path.join(
   RADIUS_OPENCLAW_ADAPTER_DIR,
   "plugin.json",
+);
+const RADIUS_OPENCLAW_RUNTIME_DIR = path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "runtime", "python");
+const RADIUS_RUNTIME_SOURCE_DIR = path.join(RADIUS_SKILLS_DIR, "runtime", "python");
+const RADIUS_RUNTIME_SOURCE_MODULE = path.join(RADIUS_RUNTIME_SOURCE_DIR, "radius_wallet_runtime.py");
+const RADIUS_RUNTIME_SOURCE_CLI = path.join(RADIUS_RUNTIME_SOURCE_DIR, "radius_wallet_cli.py");
+const RADIUS_OPENCLAW_RUNTIME_MODULE = path.join(
+  RADIUS_OPENCLAW_RUNTIME_DIR,
+  "radius_wallet_runtime.py",
+);
+const RADIUS_OPENCLAW_RUNTIME_CLI = path.join(
+  RADIUS_OPENCLAW_RUNTIME_DIR,
+  "radius_wallet_cli.py",
 );
 const RADIUS_OPENCLAW_ENTRY_CANDIDATES = [
   path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "dist", "index.js"),
@@ -279,6 +296,106 @@ function tryParseTrailingJson(text = "") {
   }
 }
 
+function escapeShellArg(value = "") {
+  const text = String(value ?? "");
+  return `'${text.replace(/'/g, `'"'"'`)}'`;
+}
+
+function collectRadiusRuntimeReadiness() {
+  const runtime = {
+    runtimeDir: RADIUS_OPENCLAW_RUNTIME_DIR,
+    runtimeDirExists: fs.existsSync(RADIUS_OPENCLAW_RUNTIME_DIR),
+    runtimeModulePath: RADIUS_OPENCLAW_RUNTIME_MODULE,
+    runtimeModuleExists: fs.existsSync(RADIUS_OPENCLAW_RUNTIME_MODULE),
+    runtimeCliPath: RADIUS_OPENCLAW_RUNTIME_CLI,
+    runtimeCliExists: fs.existsSync(RADIUS_OPENCLAW_RUNTIME_CLI),
+    pythonPath: null,
+    pythonAvailable: false,
+    cliReadOpsProbe: {
+      ok: false,
+      code: null,
+      tools: [],
+      missing: [],
+      output: "",
+      error: null,
+    },
+  };
+
+  if (!runtime.runtimeModuleExists || !runtime.runtimeCliExists) {
+    runtime.cliReadOpsProbe.error =
+      "runtime python module or CLI missing under adapters/openclaw/runtime/python";
+    return runtime;
+  }
+
+  const pythonCandidates = [
+    String(process.env.RADIUS_PYTHON_BIN || "").trim(),
+    String(process.env.PYTHON_BIN || "").trim(),
+    "python3",
+    "python",
+  ].filter(Boolean);
+
+  for (const candidate of pythonCandidates) {
+    const resolved = childProcess.spawnSync("sh", ["-lc", `command -v ${escapeShellArg(candidate)}`], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        OPENCLAW_STATE_DIR: STATE_DIR,
+        OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+      },
+    });
+
+    if (resolved.status === 0) {
+      runtime.pythonPath = (resolved.stdout || "").trim() || candidate;
+      runtime.pythonAvailable = true;
+      break;
+    }
+  }
+
+  if (!runtime.pythonAvailable || !runtime.pythonPath) {
+    runtime.cliReadOpsProbe.error =
+      "python runtime unavailable (set RADIUS_PYTHON_BIN or install python3)";
+    return runtime;
+  }
+
+  const probeScript = [
+    "import argparse, json, os, runpy, sys",
+    `sys.path.insert(0, ${JSON.stringify(RADIUS_OPENCLAW_RUNTIME_DIR)})`,
+    `module = runpy.run_path(${JSON.stringify(RADIUS_OPENCLAW_RUNTIME_CLI)})`,
+    "parser = module['build_parser']()",
+    "subparsers_action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)",
+    "commands = sorted(subparsers_action.choices.keys()) if subparsers_action else []",
+    "print(json.dumps({'commands': commands}))",
+  ].join("\n");
+
+  const probe = childProcess.spawnSync(runtime.pythonPath, ["-c", probeScript], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENCLAW_STATE_DIR: STATE_DIR,
+      OPENCLAW_WORKSPACE_DIR: WORKSPACE_DIR,
+    },
+  });
+
+  const rawOutput = `${probe.stdout || ""}${probe.stderr || ""}`.trim();
+  runtime.cliReadOpsProbe.code = typeof probe.status === "number" ? probe.status : 1;
+  runtime.cliReadOpsProbe.output = rawOutput;
+
+  if (probe.status !== 0) {
+    runtime.cliReadOpsProbe.error = rawOutput || "read-op probe failed";
+    return runtime;
+  }
+
+  const parsed = tryParseTrailingJson(rawOutput);
+  const tools = Array.isArray(parsed?.commands) ? parsed.commands : [];
+  const readOnlyOps = ["wallet-address", "balance", "tx-status"];
+  const missing = readOnlyOps.filter((name) => !tools.includes(name));
+
+  runtime.cliReadOpsProbe.tools = tools;
+  runtime.cliReadOpsProbe.missing = missing;
+  runtime.cliReadOpsProbe.ok = missing.length === 0;
+  return runtime;
+}
+
 function ensureRadiusOpenClawAdapterContract() {
   const actions = [];
 
@@ -292,6 +409,25 @@ function ensureRadiusOpenClawAdapterContract() {
   }
 
   fs.mkdirSync(path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "src"), { recursive: true });
+  fs.mkdirSync(RADIUS_OPENCLAW_RUNTIME_DIR, { recursive: true });
+
+  const copyRuntimeIfMissing = (sourcePath, targetPath, label) => {
+    if (fs.existsSync(targetPath)) return;
+    if (!fs.existsSync(sourcePath)) return;
+    fs.copyFileSync(sourcePath, targetPath);
+    actions.push(`copied ${label} into adapter runtime/python`);
+  };
+
+  copyRuntimeIfMissing(
+    RADIUS_RUNTIME_SOURCE_MODULE,
+    RADIUS_OPENCLAW_RUNTIME_MODULE,
+    "radius_wallet_runtime.py",
+  );
+  copyRuntimeIfMissing(
+    RADIUS_RUNTIME_SOURCE_CLI,
+    RADIUS_OPENCLAW_RUNTIME_CLI,
+    "radius_wallet_cli.py",
+  );
 
   const legacyManifestPath = fs.existsSync(RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST)
     ? RADIUS_OPENCLAW_LEGACY_PLUGIN_MANIFEST
@@ -304,55 +440,160 @@ function ensureRadiusOpenClawAdapterContract() {
     } catch {}
   }
 
-  if (!fs.existsSync(RADIUS_OPENCLAW_PLUGIN_MANIFEST)) {
-    const normalizedName =
-      typeof legacyManifest?.name === "string" && legacyManifest.name.trim()
-        ? legacyManifest.name.trim()
-        : RADIUS_PLUGIN_ID;
+  const normalizedName =
+    typeof legacyManifest?.name === "string" && legacyManifest.name.trim()
+      ? legacyManifest.name.trim()
+      : RADIUS_PLUGIN_ID;
 
-    const openclawManifest = {
-      id: RADIUS_PLUGIN_ID,
-      name: normalizedName,
-      description:
-        typeof legacyManifest?.description === "string" && legacyManifest.description.trim()
-          ? legacyManifest.description.trim()
-          : "Radius wallet adapter for OpenClaw",
-      configSchema: {
-        type: "object",
-        additionalProperties: true,
-      },
-      activation: {
-        onStartup: true,
-        onCapabilities: ["tool"],
-      },
-      contracts: {
-        tools: [],
-      },
-    };
+  const desiredManifest = {
+    id: RADIUS_PLUGIN_ID,
+    name: normalizedName,
+    description:
+      typeof legacyManifest?.description === "string" && legacyManifest.description.trim()
+        ? legacyManifest.description.trim()
+        : "Radius wallet adapter for OpenClaw",
+    configSchema: {
+      type: "object",
+      additionalProperties: true,
+    },
+    activation: {
+      onStartup: true,
+      onCapabilities: ["tool"],
+    },
+    contracts: {
+      tools: RADIUS_READ_TOOL_NAMES,
+    },
+  };
 
+  let existingManifest = null;
+  if (fs.existsSync(RADIUS_OPENCLAW_PLUGIN_MANIFEST)) {
+    try {
+      existingManifest = JSON.parse(fs.readFileSync(RADIUS_OPENCLAW_PLUGIN_MANIFEST, "utf8"));
+    } catch {
+      existingManifest = null;
+    }
+  }
+
+  const shouldWriteManifest =
+    !existingManifest || JSON.stringify(existingManifest) !== JSON.stringify(desiredManifest);
+  if (shouldWriteManifest) {
     fs.writeFileSync(
       RADIUS_OPENCLAW_PLUGIN_MANIFEST,
-      `${JSON.stringify(openclawManifest, null, 2)}\n`,
+      `${JSON.stringify(desiredManifest, null, 2)}\n`,
       "utf8",
     );
-    actions.push("created openclaw.plugin.json from adapter scaffold");
+    actions.push(
+      existingManifest
+        ? "normalized openclaw.plugin.json for deterministic Radius read tool contract"
+        : "created openclaw.plugin.json for deterministic Radius read tool contract",
+    );
   }
 
   const adapterEntryPath = path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "src", "index.ts");
-  if (!fs.existsSync(adapterEntryPath)) {
-    const entrySource = `import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+  const desiredEntrySource = `import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { Type } from "@sinclair/typebox";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { RadiusWalletRuntime } from "../runtime/python/radius_wallet_runtime.py";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const runtime = new RadiusWalletRuntime();
+const runtimeConfiguredPath = path.resolve(__dirname, "../runtime/python");
+
+function mapError(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    content: [{ type: "text", text: message }],
+    structuredContent: { error: message, runtimePath: runtimeConfiguredPath },
+    isError: true,
+  };
+}
 
 export default definePluginEntry({
-  id: "${RADIUS_PLUGIN_ID}",
+  id: "radius-wallet",
   name: "Radius Wallet",
-  register(_api) {
-    // Phase 3.2: adapter contract hardening only.
-    // Tool registration lands in Phase 3.4/3.5.
+  description: "Deterministic Radius wallet read operations via shared runtime",
+  register(api) {
+    api.registerTool({
+      name: "radius_wallet_address",
+      description: "Return this agent's Radius wallet address for the selected provider.",
+      parameters: Type.Object({
+        provider: Type.Optional(Type.Union([Type.Literal("local"), Type.Literal("para")])),
+      }),
+      async execute(_id, params) {
+        try {
+          const result = runtime.wallet_address(params?.provider ?? "local");
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        } catch (err) {
+          return mapError(err);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "radius_balance",
+      description: "Get Radius Testnet RUSD and SBC balances for an address or the selected provider wallet.",
+      parameters: Type.Object({
+        address: Type.Optional(Type.String()),
+        provider: Type.Optional(Type.Union([Type.Literal("local"), Type.Literal("para")])),
+      }),
+      async execute(_id, params) {
+        try {
+          const result = runtime.balance(
+            params?.provider ?? "local",
+            params?.address,
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        } catch (err) {
+          return mapError(err);
+        }
+      },
+    });
+
+    api.registerTool({
+      name: "radius_tx_status",
+      description: "Fetch a Radius transaction receipt by hash.",
+      parameters: Type.Object({
+        tx_hash: Type.String(),
+      }),
+      async execute(_id, params) {
+        try {
+          const result = runtime.tx_status(params.tx_hash);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        } catch (err) {
+          return mapError(err);
+        }
+      },
+    });
   },
 });
 `;
-    fs.writeFileSync(adapterEntryPath, entrySource, "utf8");
-    actions.push("created src/index.ts plugin entrypoint scaffold");
+
+  let existingEntrySource = "";
+  try {
+    existingEntrySource = fs.readFileSync(adapterEntryPath, "utf8");
+  } catch {
+    existingEntrySource = "";
+  }
+
+  if (existingEntrySource !== desiredEntrySource) {
+    fs.writeFileSync(adapterEntryPath, desiredEntrySource, "utf8");
+    actions.push(
+      existingEntrySource
+        ? "updated src/index.ts with deterministic Radius read tools"
+        : "created src/index.ts with deterministic Radius read tools",
+    );
   }
 
   const adapterPackagePath = path.join(RADIUS_OPENCLAW_ADAPTER_DIR, "package.json");
@@ -401,6 +642,9 @@ export default definePluginEntry({
     openclawManifestPath: RADIUS_OPENCLAW_PLUGIN_MANIFEST,
     adapterEntryPath,
     adapterPackagePath,
+    runtimeDir: RADIUS_OPENCLAW_RUNTIME_DIR,
+    runtimeModulePath: RADIUS_OPENCLAW_RUNTIME_MODULE,
+    runtimeCliPath: RADIUS_OPENCLAW_RUNTIME_CLI,
   };
 }
 
@@ -444,6 +688,8 @@ async function collectRadiusPluginState(configText = "") {
   const configuredPluginLoadPaths = parseConfiguredPluginLoadPaths(configText);
   const adapterPathConfigured = configuredPluginLoadPaths.includes(RADIUS_OPENCLAW_ADAPTER_DIR);
 
+  const runtimeReadiness = collectRadiusRuntimeReadiness();
+
   const pluginsListResult = await runCmd(OPENCLAW_NODE, clawArgs(["plugins", "list", "--json"]));
   const pluginsListJson = tryParseTrailingJson(pluginsListResult.output || "");
 
@@ -477,6 +723,7 @@ async function collectRadiusPluginState(configText = "") {
       pluginAuthoring: RADIUS_BUILDING_PLUGIN_DOCS_URL,
     },
     expectedPluginId: RADIUS_PLUGIN_ID,
+    expectedReadTools: RADIUS_READ_TOOL_NAMES,
     adapterDir: RADIUS_OPENCLAW_ADAPTER_DIR,
     adapterDirExists,
     manifestPath,
@@ -487,6 +734,7 @@ async function collectRadiusPluginState(configText = "") {
     configuredPluginLoadPaths,
     adapterPathConfigured,
     pluginList: pluginListSummary,
+    runtime: runtimeReadiness,
   };
 }
 
@@ -559,6 +807,11 @@ async function applyRadiusSkillsConfig() {
     `${RADIUS_PLUGIN_LOAD_PATHS_KEY}: ${JSON.stringify(targetPluginLoadPaths)}\n${RADIUS_PLUGIN_ENABLED_KEY}: true`,
   );
 
+  const pluginReadOpsReady =
+    pluginAfter?.runtime?.cliReadOpsProbe?.ok === true &&
+    pluginAfter?.pluginList?.enabled === true &&
+    pluginAfter?.adapterPathConfigured === true;
+
   return {
     ...state,
     configuredExtraDirsBefore: state.configuredExtraDirs,
@@ -569,6 +822,8 @@ async function applyRadiusSkillsConfig() {
       configuredPluginLoadPathsAfter: targetPluginLoadPaths,
       adapterPathConfiguredAfter: targetPluginLoadPaths.includes(RADIUS_OPENCLAW_ADAPTER_DIR),
       pluginListAfterConfig: pluginAfter.pluginList,
+      runtimeAfterConfig: pluginAfter.runtime,
+      readOpsReadyAfterConfig: pluginReadOpsReady,
       adapterHardening,
     },
     configApplyResults: [
@@ -665,7 +920,7 @@ async function startGateway() {
   const radiusBootstrap = await ensureRadiusSkillsConfigured();
   log.info(
     "radius-bootstrap",
-    `skills=${radiusBootstrap.discoveredSkillCount} missing=${radiusBootstrap.missingRequired.join(",") || "none"} pluginPathConfigured=${radiusBootstrap.plugin?.adapterPathConfiguredAfter === true} pluginEnabled=${radiusBootstrap.plugin?.pluginListAfterConfig?.enabled === true}`,
+    `skills=${radiusBootstrap.discoveredSkillCount} missing=${radiusBootstrap.missingRequired.join(",") || "none"} pluginPathConfigured=${radiusBootstrap.plugin?.adapterPathConfiguredAfter === true} pluginEnabled=${radiusBootstrap.plugin?.pluginListAfterConfig?.enabled === true} readOpsReady=${radiusBootstrap.plugin?.readOpsReadyAfterConfig === true} readOpsMissing=${(radiusBootstrap.plugin?.runtimeAfterConfig?.cliReadOpsProbe?.missing || []).join(",") || "none"}`,
   );
 
   const stopResult = await runCmd(OPENCLAW_NODE, clawArgs(["gateway", "stop"]));
@@ -1140,6 +1395,16 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       }
       if (radiusSkills?.plugin?.manifestIssues?.length > 0) {
         extra += `[radius-plugin] manifest issues: ${radiusSkills.plugin.manifestIssues.join("; ")}\n`;
+      }
+      const runtimeProbe = radiusSkills?.plugin?.runtimeAfterConfig?.cliReadOpsProbe;
+      if (runtimeProbe) {
+        extra += `[radius-plugin] read-op probe ok=${runtimeProbe.ok === true} exit=${runtimeProbe.code}\n`;
+        if (runtimeProbe.missing?.length > 0) {
+          extra += `[radius-plugin] read-op probe missing: ${runtimeProbe.missing.join(", ")}\n`;
+        }
+        if (runtimeProbe.error) {
+          extra += `[radius-plugin] read-op probe error: ${runtimeProbe.error}\n`;
+        }
       }
       for (const apply of radiusSkills.configApplyResults) {
         extra += `[radius-skills] config set ${apply.key} exit=${apply.code}\n`;

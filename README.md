@@ -82,7 +82,19 @@ For Phase 3.2 adapter hardening, setup normalizes the vendored Radius OpenClaw a
 - creates `adapters/openclaw/src/index.ts` plugin entrypoint scaffold when missing
 - ensures adapter `package.json` has `openclaw.extensions` and `openclaw.runtimeExtensions` metadata
 
-This keeps runtime discovery deterministic while we finish tool implementation in Phases 3.4/3.5.
+For Phase 3.4 deterministic read-op runtime wiring, setup also ensures:
+
+- `adapters/openclaw/src/index.ts` registers read tools only:
+  - `radius_wallet_address`
+  - `radius_balance`
+  - `radius_tx_status`
+- shared Python runtime files are present at `adapters/openclaw/runtime/python/`:
+  - `radius_wallet_runtime.py`
+  - `radius_wallet_cli.py`
+- plugin contract advertises read tools in `openclaw.plugin.json` contracts
+- setup/debug surfaces include read-op readiness probe output (missing commands/errors)
+
+This keeps runtime discovery and read-only wallet operations deterministic while deferring transfer/send to Phase 3.5.
 
 ## Day-1 Setup Checklist
 
