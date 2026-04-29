@@ -72,6 +72,7 @@ At container start, vendored skills are copied into persistent storage (`RADIUS_
 - Confirm `/setup` loads and accepts password
 - Run onboarding once
 - Verify `/healthz` returns `{ "ok": true, ... }`
+- In setup status card, confirm Radius skills source and discovered count are shown
 - Open `/openclaw` via setup link
 - If using Telegram/Discord, approve pending devices from setup tools
 

@@ -128,6 +128,15 @@ const TUI_MAX_SESSION_MS = Number.parseInt(
   process.env.TUI_MAX_SESSION_MS ?? "1800000",
   10,
 );
+const RADIUS_SKILLS_DIR =
+  process.env.RADIUS_SKILLS_DIR?.trim() ||
+  path.join(STATE_DIR, "external-skills", "radius-skills");
+const RADIUS_REQUIRED_SKILLS = ["radius-wallet", "a2a-comms", "registering-agent"];
+const RADIUS_SKILL_CONFIG_KEYS = [
+  "skills.externalDirs",
+  "skills.external_dirs",
+  "agent.skills.externalDirs",
+];
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
@@ -146,6 +155,102 @@ function isConfigured() {
   } catch {
     return false;
   }
+}
+
+function discoverRadiusSkills(rootDir = RADIUS_SKILLS_DIR) {
+  const discovered = [];
+
+  function walk(dirPath) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        const skillFile = path.join(fullPath, "SKILL.md");
+        if (fs.existsSync(skillFile)) {
+          discovered.push({
+            name: path.basename(fullPath),
+            path: fullPath,
+            published: (() => {
+              try {
+                return fs.readFileSync(skillFile, "utf8").includes("published: true");
+              } catch {
+                return false;
+              }
+            })(),
+          });
+        }
+        walk(fullPath);
+      }
+    }
+  }
+
+  if (fs.existsSync(rootDir)) {
+    walk(rootDir);
+  }
+
+  return discovered;
+}
+
+function parseConfiguredSkillRoots(configText = "") {
+  if (!configText || typeof configText !== "string") return [];
+  const roots = [];
+  for (const key of RADIUS_SKILL_CONFIG_KEYS) {
+    const marker = `${key}:`;
+    const idx = configText.indexOf(marker);
+    if (idx === -1) continue;
+    const after = configText.slice(idx + marker.length);
+    const firstLine = (after.split("\n")[0] || "").trim();
+    if (!firstLine) continue;
+
+    if (firstLine.startsWith("[")) {
+      const inside = firstLine.slice(1, firstLine.lastIndexOf("]") >= 0 ? firstLine.lastIndexOf("]") : undefined);
+      const parts = inside.split(",").map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+      roots.push(...parts);
+    } else {
+      roots.push(firstLine.replace(/^['"]|['"]$/g, ""));
+    }
+  }
+  return [...new Set(roots)];
+}
+
+async function ensureRadiusSkillsConfigured() {
+  const discovered = discoverRadiusSkills(RADIUS_SKILLS_DIR);
+  const discoveredNames = [...new Set(discovered.map((x) => x.name))];
+
+  const getConfig = await runCmd(OPENCLAW_NODE, clawArgs(["config", "get"]));
+  const configText = getConfig.output || "";
+  const configuredRoots = parseConfiguredSkillRoots(configText);
+
+  const targetRoots = [...new Set([...(configuredRoots || []), RADIUS_SKILLS_DIR])];
+  const applyResults = [];
+
+  for (const key of RADIUS_SKILL_CONFIG_KEYS) {
+    const setResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["config", "set", "--json", key, JSON.stringify(targetRoots)]),
+    );
+    applyResults.push({ key, code: setResult.code, output: setResult.output || "" });
+  }
+
+  const missingRequired = RADIUS_REQUIRED_SKILLS.filter((name) => !discoveredNames.includes(name));
+
+  return {
+    radiusSkillsDir: RADIUS_SKILLS_DIR,
+    discoveredSkills: discovered,
+    discoveredSkillNames: discoveredNames,
+    discoveredSkillCount: discovered.length,
+    configuredRootsBefore: configuredRoots,
+    configuredRootsAfter: targetRoots,
+    configApplyResults: applyResults,
+    missingRequired,
+  };
 }
 
 async function syncAllowedOrigins() {
@@ -417,6 +522,7 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   const { version, channelsHelp } = await getOpenclawInfo();
+  const radiusSkills = await ensureRadiusSkillsConfigured();
 
   const authGroups = [
     {
@@ -522,6 +628,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     channelsAddHelp: channelsHelp,
     authGroups,
     tuiEnabled: ENABLE_WEB_TUI,
+    radiusSkills,
   });
 });
 
@@ -667,6 +774,16 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     if (ok) {
       extra += "\n[setup] Configuring gateway settings...\n";
 
+      const radiusSkills = await ensureRadiusSkillsConfigured();
+      extra += `[radius-skills] source=${radiusSkills.radiusSkillsDir}\n`;
+      extra += `[radius-skills] discovered=${radiusSkills.discoveredSkillCount}\n`;
+      if (radiusSkills.missingRequired.length > 0) {
+        extra += `[radius-skills] missing required: ${radiusSkills.missingRequired.join(", ")}\n`;
+      }
+      for (const apply of radiusSkills.configApplyResults) {
+        extra += `[radius-skills] config set ${apply.key} exit=${apply.code}\n`;
+      }
+
       const allowInsecureResult = await runCmd(
         OPENCLAW_NODE,
         clawArgs([
@@ -781,6 +898,7 @@ app.get("/setup/api/debug", requireSetupAuth, async (_req, res) => {
     OPENCLAW_NODE,
     clawArgs(["channels", "add", "--help"]),
   );
+  const radiusSkills = await ensureRadiusSkillsConfigured();
   res.json({
     wrapper: {
       node: process.version,
@@ -800,6 +918,7 @@ app.get("/setup/api/debug", requireSetupAuth, async (_req, res) => {
       version: v.output.trim(),
       channelsAddHelpIncludesTelegram: help.output.includes("telegram"),
     },
+    radiusSkills,
   });
 });
 
