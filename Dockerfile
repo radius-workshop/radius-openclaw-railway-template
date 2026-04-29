@@ -1,5 +1,8 @@
 FROM node:22-bookworm
 
+ARG RADIUS_SKILLS_REPO=https://github.com/radiustechsystems/skills.git
+ARG RADIUS_SKILLS_REF=main
+
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -13,6 +16,13 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g openclaw@2026.3.13 clawhub@latest
+
+# Vendor Radius skills (supports pinning to PR commit SHA via build arg)
+RUN rm -rf /app/vendor/radius-skills \
+  && mkdir -p /app/vendor \
+  && git clone --filter=blob:none --no-checkout "$RADIUS_SKILLS_REPO" /app/vendor/radius-skills \
+  && cd /app/vendor/radius-skills \
+  && git checkout "$RADIUS_SKILLS_REF"
 
 # Backward-compatibility shim for older OPENCLAW_ENTRY values.
 RUN mkdir -p /openclaw \

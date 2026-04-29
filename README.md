@@ -53,6 +53,19 @@ This template exposes your OpenClaw gateway to the public internet.
 - `ENABLE_WEB_TUI=false`
 - `TUI_IDLE_TIMEOUT_MS=300000`
 - `TUI_MAX_SESSION_MS=1800000`
+- `RADIUS_SKILLS_DIR=/data/.openclaw/external-skills/radius-skills`
+- `RADIUS_SKILLS_BOOTSTRAP_FROM_IMAGE=true`
+
+### Build-time skills source pinning
+
+This template vendors the Radius skills repo into the image at `/app/vendor/radius-skills`.
+
+By default it tracks `main`, but you can pin a PR commit SHA for same-day testing:
+
+- `RADIUS_SKILLS_REPO` (default: `https://github.com/radiustechsystems/skills.git`)
+- `RADIUS_SKILLS_REF` (default: `main`; set to branch or commit SHA)
+
+At container start, vendored skills are copied into persistent storage (`RADIUS_SKILLS_DIR`) when no git checkout exists there yet.
 
 ## Day-1 Setup Checklist
 
