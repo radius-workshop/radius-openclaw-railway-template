@@ -14,7 +14,7 @@
     "express": "^5.1.0",
     "http-proxy": "^1.18.1",
     "node-pty": "^1.0.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["node-pty"]
